@@ -60,7 +60,10 @@ void Server::start() {
 
     
     
-    listen(serverSocket, SOMAXCONN);
+    if(listen(serverSocket, SOMAXCONN) == SOCKET_ERROR) {
+        std::cerr << "Listen failed" << std::endl;
+        return;
+    }
 
     while(true) {
         sockaddr addr;
@@ -88,8 +91,6 @@ SOCKET Server::find_name(const std::string& name) {
 }
 
 int Server::receiver_in(const std::string& receiver) {
-    std::lock_guard<std::mutex> lock(usersMutex);
-
     for (int i = 0; i < users.size(); ++i) {
         if (std::get<1>(users[i]) == receiver) {
             return i;
@@ -99,28 +100,56 @@ int Server::receiver_in(const std::string& receiver) {
 }
 
 void Server::handle_conn(SOCKET clientSocket) {
+    bool logged = false;
     auto [sender, receiver, message] = receive(clientSocket);
     //Zakladamy: sender = "login" lub sender = "logout"
 
+    if(sender == "" && receiver == "" && message == "") {
+        std::cerr << "Error receiving message" << std::endl;
+        if(logged) {
+            std::lock_guard<std::mutex> lock(usersMutex);
+            int indx = receiver_in(receiver);
+            users.erase(users.begin() + indx);
+        }
+        closesocket(clientSocket);
+        return;
+    }
+
     if(sender == "login") {
+        std::lock_guard<std::mutex> lock(usersMutex); //"login [nick] [ignore]"
+        // Kazda kolejna wiadomosc zaczyna sie automatycznie od nicku nadawcy
         if(receiver_in(receiver) != -1) {
             std::cerr << "User " << receiver << " already logged in." << std::endl;
             closesocket(clientSocket);
             return;
         }
 
-        std::lock_guard<std::mutex> lock(usersMutex);
         users.push_back({clientSocket, receiver});
         std::cout << "User " << receiver << " logged in." << std::endl;
+        send_msg(clientSocket, "Server", receiver, "Logged successfully.");
+        logged = true;
     }
 
-    while(true) {
+    while(logged) {
         auto [sender, receiver, message] = receive(clientSocket);
-        if(sender == "logout") {
-            std::cout << "User " << receiver << " logged out." << std::endl;
+
+        if(sender == "" && receiver == "" && message == "") {
+                std::cerr << "Error receiving message" << std::endl;
+
+                std::lock_guard<std::mutex> lock(usersMutex);
+                int indx = receiver_in(receiver);
+                users.erase(users.begin() + indx);
+                closesocket(clientSocket);
+                return;
+            }
+
+        if(receiver == "logout") { // "[nick] logout [ignore]"
+            std::cout << "User " << sender << " logged out." << std::endl;
 
             std::lock_guard<std::mutex> lock(usersMutex);
-            users.erase(users.begin() + receiver_in(receiver));
+            int indx = receiver_in(sender);
+            users.erase(users.begin() + indx);
+            logged = false;
             break;
         }
         send_msg(clientSocket, sender, receiver, message);
@@ -132,31 +161,40 @@ void Server::handle_conn(SOCKET clientSocket) {
 std::tuple<std::string, std::string, std::string> Server::receive(SOCKET clientSocket) { 
     char buffer[1024] = {0};
     std::string sender, receiver, message;
-        recv(clientSocket, buffer, sizeof(buffer), 0);
-        int len = atoi(buffer);
-        if(len > 0) {
-            char* recv_msg = new char[len + 1]; // Sposob wiadomosci: [nadawca] [odbiorca] [wiadomosc]
-            int rcved = recv(clientSocket, recv_msg, len, 0);
-            if(rcved > 0) {
-                recv_msg[rcved] = '\0';
-            }
-
-            std::string s(recv_msg);
-            std::istringstream iss(s);
-            iss >> sender >> receiver;
-            std::getline(iss, message);
-            if(!message.empty() && message[0] == ' '){
-                message.erase(0, 1);
-            }
-            
-            delete [] recv_msg;
+    if(recv(clientSocket, buffer, sizeof(buffer), 0) == SOCKET_ERROR or buffer[0] == '\0') {
+        return {"", "", ""};
+    }
+    int len = atoi(buffer);
+    if(len > 0) {
+        if(len > 1000000) {
+            std::cerr << "Message too long" << std::endl;
+            return {"", "", ""};
         }
+        char* recv_msg = new char[len + 1]; // Sposob wiadomosci: [nadawca] [odbiorca] [wiadomosc]
+        int rcved = recv(clientSocket, recv_msg, len, 0);
+        if(rcved > 0) {
+            recv_msg[rcved] = '\0';
+        }
+
+        std::string s(recv_msg);
+        std::istringstream iss(s);
+        iss >> sender >> receiver;
+        std::getline(iss, message);
+        if(!message.empty() && message[0] == ' '){
+            message.erase(0, 1);
+        }
+        
+        delete [] recv_msg;
+    }
     return {sender, receiver, message};
 }
 
 void Server::send_msg(SOCKET clientSocket, const std::string& sender, const std::string& receiver,
             const std::string& message) {
+    std::lock_guard<std::mutex> lock(usersMutex);
     if(receiver_in(receiver) == -1) {
+        std::string tempLen = "14";
+        send(clientSocket, tempLen.c_str(), 2, 0);
         send(clientSocket, "User not found", 14, 0);
         return;
     }
@@ -164,7 +202,7 @@ void Server::send_msg(SOCKET clientSocket, const std::string& sender, const std:
     SOCKET receiverSocket = find_name(receiver);
 
     if(!sender.empty() && !receiver.empty() && !message.empty()) {
-        int len = sender.length() + receiver.length() + message.length() + 2; // +2 spaces
+        int len = sender.length() + receiver.length() + message.length() + 2; // +2 spacje
         std::string lenStr = std::to_string(len);
         send(receiverSocket, lenStr.c_str(), lenStr.length(), 0);
         std::string fullMessage = sender + " " + receiver + " " + message;
