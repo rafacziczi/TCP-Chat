@@ -82,7 +82,6 @@ void Server::start() {
 }
 
 SOCKET Server::find_name(const std::string& name) {
-    std::lock_guard<std::mutex> lock(usersMutex);
     for(const auto& user : users) {
         if(std::get<1>(user) == name) {
             return std::get<0>(user);
@@ -118,6 +117,7 @@ void Server::handle_conn(SOCKET clientSocket) {
     }
 
     if(sender == "login") {
+        {
         std::lock_guard<std::mutex> lock(usersMutex); //"login [nick] [ignore]"
         // Kazda kolejna wiadomosc zaczyna sie automatycznie od nicku nadawcy
         if(receiver_in(receiver) != -1) {
@@ -128,6 +128,7 @@ void Server::handle_conn(SOCKET clientSocket) {
 
         users.push_back({clientSocket, receiver});
         std::cout << "User " << receiver << " logged in." << std::endl;
+    } //Zwolniony mutex
         send_msg(clientSocket, "Server", receiver, "Logged successfully.");
         logged = true;
     }
@@ -196,6 +197,7 @@ void Server::send_msg(SOCKET clientSocket, const std::string& sender, const std:
     std::lock_guard<std::mutex> lock(usersMutex);
     if(receiver_in(receiver) == -1) {
         std::string tempLen = "14";
+        tempLen += std::string(1024 - tempLen.length(), ' ');
         send(clientSocket, tempLen.c_str(), 2, 0);
         send(clientSocket, "User not found", 14, 0);
         return;

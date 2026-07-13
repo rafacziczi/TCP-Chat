@@ -5,6 +5,9 @@
 
 const std::string SERVER_IP = "127.0.0.1";
 const std::string keywords[] = {"login", "logout", "msg"};
+std::mutex clientMutex;
+
+bool running = true;
 
 bool check_keywords(const std::string& name) {
     for(const auto& word: keywords) {
@@ -17,9 +20,9 @@ bool check_keywords(const std::string& name) {
 
 void send_client(const std::string& command, const std::string& receiver, const std::string& message, SOCKET clientSocket, 
     std::string& client_name) {
+    std::lock_guard<std::mutex> lock(clientMutex);
     std::string msg;
     int len = 0;
-    bool logout = false;
     if(command == "login") {
         if(check_keywords(receiver)) {
             std::cout << "Cannot use reserved keywords as nicknames." << std::endl;
@@ -42,7 +45,8 @@ void send_client(const std::string& command, const std::string& receiver, const 
         else {
             msg = client_name + " " + command;
             client_name = "";
-            logout = true;
+            running = false; //Zatrzymanie clienta
+            std::cout << "Disconnected" << std::endl;
         }
     }
     else if(command == "msg") {
@@ -72,43 +76,50 @@ void send_client(const std::string& command, const std::string& receiver, const 
     len_str += std::string(1024 - len_str.length(), ' ');
     send(clientSocket, len_str.c_str(), 1024, 0);
     send(clientSocket, msg.c_str(), len, 0);
-
-    if(logout) {
-        std::cout << "Logged out." << std::endl;
-        closesocket(clientSocket);
-        WSACleanup();
-    }
 }
 
 
 void receive_client(SOCKET clientSocket) {
     char buffer[1024] = {0};
     std::string sender, receiver, message;
-    if(recv(clientSocket, buffer, sizeof(buffer), 0) == SOCKET_ERROR or buffer[0] == '\0') {
-        return;
-    }
-    int len = atoi(buffer);
-    if(len > 0) {
-        if(len > 1000000) {
+
+    while(running) {
+        memset(buffer, 0, sizeof(buffer));
+
+        if(recv(clientSocket, buffer, sizeof(buffer), 0) == SOCKET_ERROR or buffer[0] == '\0') {
             return;
         }
-        char* recv_msg = new char[len + 1]; // Sposob wiadomosci: [nadawca] [odbiorca] [wiadomosc]
-        int rcved = recv(clientSocket, recv_msg, len, 0);
-        if(rcved > 0) {
-            recv_msg[rcved] = '\0';
-        }
+        int len = atoi(buffer);
 
-        std::string s(recv_msg);
-        std::istringstream iss(s);
-        iss >> sender >> receiver;
-        std::getline(iss, message);
-        if(!message.empty() && message[0] == ' '){
-            message.erase(0, 1);
+        if(len > 1000000) {
+                continue;
+            }
+
+        if(len > 0) {
+            char* recv_msg = new char[len + 1]; // Sposob wiadomosci: [nadawca] [odbiorca] [wiadomosc]
+            int rcved = recv(clientSocket, recv_msg, len, 0);
+            if(rcved > 0) {
+                recv_msg[rcved] = '\0';
+            }
+            else {
+                delete[] recv_msg;
+                break;
+            }
+
+            std::string s(recv_msg);
+            std::istringstream iss(s);
+            iss >> sender >> receiver;
+            std::getline(iss, message);
+            if(!message.empty() && message[0] == ' '){
+                message.erase(0, 1);
+            }
+            
+            delete [] recv_msg;
         }
-        
-        delete [] recv_msg;
+        std::cout << sender << ": " << message << std::endl;
+        std::cout << ">";
+        std::cout.flush();
     }
-    std::cout << sender << ": " << message;
 }
 
 int main() {
@@ -140,24 +151,36 @@ int main() {
     }
 
     std::cout << "Connected!" << std::endl;
-
     std::cout << "Enter 'login' to log in," << std::endl;
     std::cout << "Enter 'logout' to log out," << std::endl;
     std::cout << "Enter 'msg [nick] [message]' to send a message." << std::endl; 
+
+    std::thread receiverThread(receive_client, clientSocket);
 
     std::string input;
     std::string client_name = "";
     std::stringstream ss;
     std::string command, receiver, message;
-    while(true) {
+    while(running) {
+        std::cout << ">";
         input = "";
         getline(std::cin, input);
+        ss.clear();
         ss.str(input);
         ss >> command >> receiver;
         std::getline(ss>>std::ws, message);
+
         send_client(command, receiver, message, clientSocket, client_name);
     }
 
     closesocket(clientSocket);
+
+    if (receiverThread.joinable()) {
+        receiverThread.join();
+    }
+
     WSACleanup();
+    std::cout << "Closed" << std::endl;
+
+    return 0;
 }
