@@ -1,5 +1,7 @@
 #include "header.h"
 
+#pragma comment(lib, "Ws2_32.lib")
+
 class Server {
 private:
     SOCKET serverSocket;
@@ -211,9 +213,14 @@ void Server::send_msg(SOCKET clientSocket, const std::string& sender, const std:
 }
 
 
+
+
+
+
 int main() {
     Server server(8080);
     server.start();
+    std::cout << "Server stopped." << std::endl;
 
     return 0;
 }
