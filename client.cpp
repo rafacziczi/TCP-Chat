@@ -43,7 +43,7 @@ void send_client(const std::string& command, const std::string& receiver, const 
             return;
         }
         else {
-            msg = client_name + " " + command;
+            msg = command;
             client_name = "";
             running = false; //Zatrzymanie clienta
             std::cout << "Disconnected" << std::endl;
@@ -63,7 +63,7 @@ void send_client(const std::string& command, const std::string& receiver, const 
             return;
         }
         else {
-            msg = client_name + " " + receiver + " " + message;
+            msg = receiver + " " + message;
         }
     }
     else {
