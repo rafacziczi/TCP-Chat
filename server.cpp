@@ -1,23 +1,34 @@
 #include "header.h"
 
-#pragma comment(lib, "Ws2_32.lib")
+struct User {
+    SOCKET userSocket;
+    std::string name;
+    unsigned char pub_key[crypto_box_PUBLICKEYBYTES];
+    
+    User(SOCKET userSocket, std::string name, const unsigned char* key)
+        : userSocket(userSocket), name(name) {
+            memcpy(pub_key, key, crypto_box_PUBLICKEYBYTES);
+        }
+};
+
 
 class Server {
 private:
     SOCKET serverSocket;
     sockaddr_in serverAddress;
-    std::vector<std::tuple<SOCKET, std::string>> users;
+    std::vector<User> users;
     std::mutex usersMutex;
 public:
     Server(int port);
     ~Server();
     void start();
-    void send_msg(SOCKET, const std::string&, const std::string&, const std::string&);
+    void send_msg(SOCKET, const std::string&, Message);
     int receiver_in(const std::string&);
     void handle_conn(SOCKET);
-    std::tuple<std::string, std::string> receive(SOCKET);
+    Message receive(SOCKET);
     SOCKET find_socket(const std::string&);
     std::string find_name(const SOCKET);
+    void find_key(unsigned char*, const std::string&);
 };
 
 Server::Server(int port) {
@@ -41,6 +52,7 @@ Server::~Server() {
     }
     WSACleanup();
 }
+
 
 void Server::start() {
     if(bind(serverSocket, (struct sockaddr*)&serverAddress, sizeof(serverAddress)
@@ -84,8 +96,8 @@ void Server::start() {
 
 SOCKET Server::find_socket(const std::string& name) {
     for(const auto& user : users) {
-        if(std::get<1>(user) == name) {
-            return std::get<0>(user);
+        if(user.name == name) {
+            return user.userSocket;
         }
     }
 
@@ -94,17 +106,28 @@ SOCKET Server::find_socket(const std::string& name) {
 
 std::string Server::find_name(const SOCKET clientSocket) {
     for(const auto& user: users) {
-        if(std::get<0>(user) == clientSocket) {
-            return std::get<1>(user);
+        if(user.userSocket == clientSocket) {
+            return user.name;
         }
     }
 
     return "";
 }
 
+
+void Server::find_key(unsigned char* output, const std::string& name) {
+    for(const auto& user: users) {
+        if(user.name == name) {
+            memcpy(output, user.pub_key, crypto_box_PUBLICKEYBYTES);
+        }
+    }
+}
+
+
+
 int Server::receiver_in(const std::string& receiver) {
     for (int i = 0; i < users.size(); ++i) {
-        if (std::get<1>(users[i]) == receiver) {
+        if (users[i].name == receiver) {
             return i;
         }
     }
@@ -113,43 +136,49 @@ int Server::receiver_in(const std::string& receiver) {
 
 void Server::handle_conn(SOCKET clientSocket) {
     bool logged = false;
-    auto [receiver, message] = receive(clientSocket);
+    Message firstMsg = receive(clientSocket);
     std::string clientName;
-    //Zakladamy: receiver = "login" lub receiver = "logout"
 
-    if(receiver == "" && message == "") {
+    if(firstMsg == Message::INVALID) {
         std::cerr << "Error receiving message" << std::endl;
-        if(logged) {
-            std::lock_guard<std::mutex> lock(usersMutex);
-            int indx = receiver_in(receiver);
-            users.erase(users.begin() + indx);
-        }
+
         closesocket(clientSocket);
         return;
     }
 
-    if(receiver == "login") {
+    if(firstMsg.type == "login") {
         {
         std::lock_guard<std::mutex> lock(usersMutex); //"login [nick] [ignore]"
-        // Kazda kolejna wiadomosc zaczyna sie automatycznie od nicku nadawcy
-        if(receiver_in(message) != -1) {
-            std::cerr << "User " << message << " already logged in." << std::endl;
+        //Kazda kolejna wiadomosc zaczyna sie automatycznie od nicku nadawcy
+        //Tylko w pierwszej wiadomosci client.cpp wysyla swoj nick, dalej przypisuje go server.cpp
+        if(receiver_in(firstMsg.sender) != -1) {
+            std::cerr << "User " << firstMsg.sender << " already logged in." << std::endl;
             closesocket(clientSocket);
             return;
         }
 
-        users.push_back({clientSocket, message});
-        std::cout << "User " << message << " logged in." << std::endl;
+        std::string pubkey_hex = firstMsg.data;
+        unsigned char pubkey[crypto_box_PUBLICKEYBYTES];
+        sodium_hex2bin(pubkey, crypto_box_PUBLICKEYBYTES, pubkey_hex.c_str(), pubkey_hex.size(), nullptr, nullptr, nullptr);
+
+        users.push_back(User(clientSocket, firstMsg.sender, pubkey)); //data = pub_key
+        std::cout << "User " << firstMsg.sender << " logged in." << std::endl;
     } //Zwolniony mutex
-        send_msg(clientSocket, "Server", message, "Logged successfully.");
+        
+        std::string logMsg = "msg\n"; 
+        logMsg += "Server\n";
+        logMsg += firstMsg.sender;
+        logMsg += '\n';
+        logMsg += "Succesfully logged in";
+        send_msg(clientSocket, "Server", Message(logMsg));
         logged = true;
-        clientName = message;
+        clientName = firstMsg.sender;
     }
 
     while(logged) {
-        auto [receiver, message] = receive(clientSocket);
+        Message rcved = receive(clientSocket);
 
-        if(receiver == "" && message == "") {
+        if(rcved == Message::INVALID) {
                 std::cerr << "Error receiving message" << std::endl;
 
                 std::lock_guard<std::mutex> lock(usersMutex);
@@ -159,7 +188,7 @@ void Server::handle_conn(SOCKET clientSocket) {
                 return;
             }
 
-        if(receiver == "logout") { // "logout [ignore]"
+        if(rcved.type == "logout") { // "logout [ignore]"
             std::cout << "User " << clientName << " logged out." << std::endl;
 
             std::lock_guard<std::mutex> lock(usersMutex);
@@ -168,72 +197,97 @@ void Server::handle_conn(SOCKET clientSocket) {
             logged = false;
             break;
         }
-        send_msg(clientSocket, clientName, receiver, message);
+
+        if (rcved.type == "get_pubkey") {
+            std::string target = rcved.receiver;
+            int idx;
+            {
+            std::lock_guard<std::mutex> lock(usersMutex);
+            idx = receiver_in(target);
+            }
+
+            if (idx == -1) {
+                std::cerr << "No receiver found" << std::endl;
+                Message reply("pubkey_error", "Server", clientName, target, "");
+                send_msg(clientSocket, "Server", reply);
+            } else {
+                char hex[crypto_box_PUBLICKEYBYTES * 2 + 1];
+                sodium_bin2hex(hex, sizeof(hex), users[idx].pub_key, crypto_box_PUBLICKEYBYTES);
+                std::string hexkey = std::string(hex);
+                Message reply("pubkey", "Server", clientName, target, hexkey);
+                send_msg(clientSocket, "Server", reply);
+            }
+            continue;
+        }
+
+        if(rcved.type == "msg" && rcved.receiver == "") {
+            continue;
+        }
+
+        send_msg(clientSocket, clientName, rcved);
     }
 
     closesocket(clientSocket);
 }
 
-std::tuple<std::string, std::string> Server::receive(SOCKET clientSocket) { 
+Message Server::receive(SOCKET clientSocket) { 
     char buffer[1024] = {0};
-    std::string receiver, message;
-    if(recv(clientSocket, buffer, sizeof(buffer), 0) == SOCKET_ERROR or buffer[0] == '\0') {
-        return {"", ""};
+    if(!recv_all(clientSocket, buffer, sizeof(buffer))) {
+        return Message::INVALID;
     }
     int len = atoi(buffer);
-    if(len > 0) {
-        if(len > 1000000) {
-            std::cerr << "Message too long" << std::endl;
-            return {"", ""};
-        }
-        char* recv_msg = new char[len + 1]; // Sposob wiadomosci odebranej: [odbiorca] [wiadomosc]
-        int rcved = recv(clientSocket, recv_msg, len, 0);
-        if(rcved > 0) {
-            recv_msg[rcved] = '\0';
-        }
-
-        std::string s(recv_msg);
-        std::istringstream iss(s);
-        iss >> receiver;
-        std::getline(iss, message);
-        if(!message.empty() && message[0] == ' '){
-            message.erase(0, 1);
-        }
-        
-        delete [] recv_msg;
+    if(len <= 0 || len > 1000000) {
+        std::cerr << "Invalid message" << std::endl;
+        return Message::INVALID;
     }
-    return {receiver, message};
+    
+    std::string msg;
+    msg.resize(len);
+    if (!recv_all(clientSocket, &msg[0], len)) {
+        return Message::INVALID;
+    }
+    return Message(msg);
 }
 
-void Server::send_msg(SOCKET clientSocket, const std::string& sender, const std::string& receiver,
-            const std::string& message) {
+void Server::send_msg(SOCKET clientSocket, const std::string& sender, Message msg) {
     std::lock_guard<std::mutex> lock(usersMutex);
-    if(receiver_in(receiver) == -1) {
-        std::string tempLen = "14";
-        tempLen += std::string(1024 - tempLen.length(), ' ');
-        send(clientSocket, tempLen.c_str(), 2, 0);
-        send(clientSocket, "User not found", 14, 0);
+    if(msg == Message::INVALID) {
+        std::cout << "Message is invalid" << std::endl;
         return;
     }
+    if(receiver_in(msg.receiver) == -1) {
+        Message user_msg = Message("msg", "Server", "", "User not found", "");
+        std::string user_msg_str = std::string(user_msg);
+        int len = user_msg_str.size();
+        std::string tempLen = std::to_string(len);
+        tempLen += std::string(1024 - tempLen.length(), ' ');
+        send_all(clientSocket, tempLen.c_str(), 1024);
+        send_all(clientSocket, user_msg_str.c_str(), len);
+        return;
+    }
+    
+    SOCKET receiverSocket = find_socket(msg.receiver);
 
-    SOCKET receiverSocket = find_socket(receiver);
-
-    if(!sender.empty() && !receiver.empty() && !message.empty()) {
-        int len = sender.length() + receiver.length() + message.length() + 2; // +2 spacje
+    if(!sender.empty() && !msg.receiver.empty() && !msg.data.empty()) {
+        msg.sender = sender;
+        std::string strMsg = std::string(msg);
+        int len = strMsg.length();
         std::string lenStr = std::to_string(len);
         lenStr += std::string(1024 - lenStr.length(), ' ');
-        send(receiverSocket, lenStr.c_str(), lenStr.length(), 0);
-        std::string fullMessage = sender + " " + receiver + " " + message;
-        send(receiverSocket, fullMessage.c_str(), len, 0);
+        send_all(receiverSocket, lenStr.c_str(), lenStr.length());
+        send_all(receiverSocket, strMsg.c_str(), len);
     }
 }
-
-
 
 
 
 
 int main() {
+    if (sodium_init() < 0) {
+        std::cerr << "sodium_init() failed" << std::endl;
+        return 1;
+    }
+
     Server server(8080);
     server.start();
     std::cout << "Server stopped." << std::endl;
