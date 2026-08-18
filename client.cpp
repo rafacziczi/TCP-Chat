@@ -2,7 +2,7 @@
 
 
 const std::string SERVER_IP = "127.0.0.1";
-const std::string keywords[] = {"login", "logout", "msg", "Server"};
+const std::string keywords[] = {"register", "login", "logout", "msg", "Server"};
 std::mutex clientMutex;
 unsigned char my_pub_key[crypto_box_PUBLICKEYBYTES];
 unsigned char my_priv_key[crypto_box_SECRETKEYBYTES];
@@ -93,7 +93,7 @@ void send_client(const std::string& command, const std::string& receiver, const 
     Message msg = Message(command, "", receiver, message, pubkey_str);
     unsigned char recv_pub_key[crypto_box_PUBLICKEYBYTES];
     int len = 0;
-    if(msg.type == "login") {
+    if(msg.type == "register") {
         msg.sender = receiver;
         if(check_keywords(msg.sender)) {
             std::cout << "Cannot use reserved keywords as nicknames." << std::endl;
@@ -104,11 +104,38 @@ void send_client(const std::string& command, const std::string& receiver, const 
             return;
         }
         else if(!check_keywords(msg.sender) && msg.sender != "") {
-            client_name = receiver;
             char hex[crypto_box_PUBLICKEYBYTES * 2 + 1];
             sodium_bin2hex(hex, sizeof(hex), my_pub_key, crypto_box_PUBLICKEYBYTES);
-            msg.data = hex;
+            msg.pubkey = hex;
         }
+
+        if(msg.data == "") {
+            std::cout << "No password specified." << std::endl;
+            return;
+        }
+        client_name = receiver;
+    }
+    else if(msg.type == "login") {
+        msg.sender = receiver;
+        if(check_keywords(msg.sender)) {
+            std::cout << "Cannot use reserved keywords as nicknames." << std::endl;
+            return;
+        }
+        else if(client_name != "") {
+            std::cout << "You are already logged in as " << client_name << "." << std::endl;
+            return;
+        }
+        else if(!check_keywords(msg.sender) && msg.sender != "") {
+            char hex[crypto_box_PUBLICKEYBYTES * 2 + 1];
+            sodium_bin2hex(hex, sizeof(hex), my_pub_key, crypto_box_PUBLICKEYBYTES);
+            msg.pubkey = hex;
+        }
+
+        if(msg.data == "") {
+            std::cout << "No password specified." << std::endl;
+            return;
+        }
+        client_name = receiver; //NAPRAWIC aby bylo dopiero po potwierdzeniu logowania
     }
     else if(msg.type == "logout") {
         if(client_name == "") {
@@ -284,6 +311,7 @@ int main() {
     }
 
     std::cout << "Connected!" << std::endl;
+    std::cout << "Enter 'register' to register," << std::endl;
     std::cout << "Enter 'login' to log in," << std::endl;
     std::cout << "Enter 'logout' to log out," << std::endl;
     std::cout << "Enter 'msg [nick] [message]' to send a message." << std::endl; 

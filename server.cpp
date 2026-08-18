@@ -4,9 +4,10 @@ struct User {
     SOCKET userSocket;
     std::string name;
     unsigned char pub_key[crypto_box_PUBLICKEYBYTES];
+    std::string passHash;
     
-    User(SOCKET userSocket, std::string name, const unsigned char* key)
-        : userSocket(userSocket), name(name) {
+    User(SOCKET userSocket, std::string name, const unsigned char* key, std::string passHash)
+        : userSocket(userSocket), name(name), passHash(passHash) {
             memcpy(pub_key, key, crypto_box_PUBLICKEYBYTES);
         }
 };
@@ -18,8 +19,9 @@ private:
     sockaddr_in serverAddress;
     std::vector<User> users;
     std::mutex usersMutex;
+    sqlite3* db;
 public:
-    Server(int port);
+    Server(int port, sqlite3* db);
     ~Server();
     void start();
     void send_msg(SOCKET, const std::string&, Message);
@@ -29,11 +31,14 @@ public:
     SOCKET find_socket(const std::string&);
     std::string find_name(const SOCKET);
     void find_key(unsigned char*, const std::string&);
+    void loadUsersDB(sqlite3*);
+    void registerUser(const User&, sqlite3*);
 };
 
-Server::Server(int port) {
+Server::Server(int port, sqlite3* db)
+    : serverSocket(INVALID_SOCKET), db(db)
+{
     WSADATA wsaData;
-
 
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
         std::cerr << "WSAStartup failed\n";
@@ -136,43 +141,74 @@ int Server::receiver_in(const std::string& receiver) {
 
 void Server::handle_conn(SOCKET clientSocket) {
     bool logged = false;
-    Message firstMsg = receive(clientSocket);
     std::string clientName;
 
-    if(firstMsg == Message::INVALID) {
-        std::cerr << "Error receiving message" << std::endl;
+    while(!logged) { //nie moze nic zrobic dopoki sie nie zaloguje
+        Message firstMsg = receive(clientSocket);
+        if(firstMsg == Message::INVALID) {
+            std::cerr << "Error receiving message" << std::endl;
 
-        closesocket(clientSocket);
-        return;
-    }
-
-    if(firstMsg.type == "login") {
-        {
-        std::lock_guard<std::mutex> lock(usersMutex); //"login [nick] [ignore]"
-        //Kazda kolejna wiadomosc zaczyna sie automatycznie od nicku nadawcy
-        //Tylko w pierwszej wiadomosci client.cpp wysyla swoj nick, dalej przypisuje go server.cpp
-        if(receiver_in(firstMsg.sender) != -1) {
-            std::cerr << "User " << firstMsg.sender << " already logged in." << std::endl;
             closesocket(clientSocket);
             return;
         }
 
-        std::string pubkey_hex = firstMsg.data;
-        unsigned char pubkey[crypto_box_PUBLICKEYBYTES];
-        sodium_hex2bin(pubkey, crypto_box_PUBLICKEYBYTES, pubkey_hex.c_str(), pubkey_hex.size(), nullptr, nullptr, nullptr);
+        if(firstMsg.type == "register") {
+            std::string logMsg = "msg\n";
+            logMsg += "Server\n";
+            logMsg += firstMsg.sender;
+            logMsg += '\n';
 
-        users.push_back(User(clientSocket, firstMsg.sender, pubkey)); //data = pub_key
-        std::cout << "User " << firstMsg.sender << " logged in." << std::endl;
-    } //Zwolniony mutex
-        
-        std::string logMsg = "msg\n"; 
-        logMsg += "Server\n";
-        logMsg += firstMsg.sender;
-        logMsg += '\n';
-        logMsg += "Succesfully logged in";
-        send_msg(clientSocket, "Server", Message(logMsg));
-        logged = true;
-        clientName = firstMsg.sender;
+            {
+                std::lock_guard<std::mutex> lock(usersMutex);
+                //Kazda kolejna wiadomosc zaczyna sie automatycznie od nicku nadawcy
+                //Tylko w pierwszej wiadomosci client.cpp wysyla swoj nick, dalej przypisuje go server.cpp
+                if(receiver_in(firstMsg.sender) != -1) {
+                    std::cerr << "User " << firstMsg.sender << " already exists." << std::endl;
+                    closesocket(clientSocket);
+                    return;
+                }
+
+                std::string pubkey_hex = firstMsg.pubkey;
+                unsigned char pubkey[crypto_box_PUBLICKEYBYTES];
+                sodium_hex2bin(pubkey, crypto_box_PUBLICKEYBYTES, pubkey_hex.c_str(), pubkey_hex.size(), nullptr, nullptr, nullptr);
+
+                User newUser(clientSocket, firstMsg.sender, pubkey, firstMsg.data); //data = passHash
+                users.push_back(newUser); //data = passHash
+                registerUser(newUser, db); // Zapisanie uzytkownika do bazy danych
+            }
+
+            logMsg += "Succesfully registered";
+            send_msg(clientSocket, "Server", Message(logMsg));
+            logged = true;
+            clientName = firstMsg.sender;
+        }
+        else if(firstMsg.type == "login") {
+            //tutaj logika sprawdzania hasla i logowania
+            int idx;
+            {
+            std::lock_guard<std::mutex> lock(usersMutex);
+            idx = receiver_in(firstMsg.sender);
+            }
+            if(idx == -1) {
+                send_msg(clientSocket, "Server", Message("msg\nServer\n" + firstMsg.sender + "\nUser not found"));
+                continue;
+            }
+            else {
+                if(users[idx].passHash == firstMsg.data) { //poki co sprawdzamy bez hashowania, czysty string
+                    users[idx].userSocket = clientSocket; // Aktualizacja gniazda użytkownika
+                    send_msg(clientSocket, "Server", Message("msg\nServer\n" + firstMsg.sender + "\nSuccesfully logged in"));
+                    logged = true;
+                    clientName = firstMsg.sender;
+                }
+                else {
+                    send_msg(clientSocket, "Server", Message("msg\nServer\n" + firstMsg.sender + "\nIncorrect password"));
+                    continue;
+                }
+            }
+        }
+        else {
+            continue; // Ignoruj inne typy wiadomości, dopóki użytkownik się nie zaloguje
+        }
     }
 
     while(logged) {
@@ -191,9 +227,9 @@ void Server::handle_conn(SOCKET clientSocket) {
         if(rcved.type == "logout") { // "logout [ignore]"
             std::cout << "User " << clientName << " logged out." << std::endl;
 
-            std::lock_guard<std::mutex> lock(usersMutex);
+            /*std::lock_guard<std::mutex> lock(usersMutex);
             int indx = receiver_in(clientName);
-            users.erase(users.begin() + indx);
+            users.erase(users.begin() + indx);*/
             logged = false;
             break;
         }
@@ -280,6 +316,44 @@ void Server::send_msg(SOCKET clientSocket, const std::string& sender, Message ms
 }
 
 
+void Server::loadUsersDB(sqlite3* db) {
+    const char* sql = "SELECT nickname, public_key, password_hash FROM users;";
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* nickname = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+            const char* public_key_str = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+            const char* password_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+
+            unsigned char pubkey[crypto_box_PUBLICKEYBYTES] = {0};
+            if (public_key_str) {
+                sodium_hex2bin(pubkey, crypto_box_PUBLICKEYBYTES, public_key_str, strlen(public_key_str), nullptr, nullptr, nullptr);
+            }
+
+            User u(INVALID_SOCKET, nickname, pubkey, password_hash);
+            users.push_back(u);
+        }
+    }
+    sqlite3_finalize(stmt);
+}
+
+void Server::registerUser(const User& u, sqlite3* db){
+    const char* sql = "INSERT INTO users (nickname, public_key, password_hash) VALUES (?, ?, ?);";
+    sqlite3_stmt* stmt;
+
+    std::string pubkey_hex(crypto_box_PUBLICKEYBYTES * 2 + 1, '\0');
+    sodium_bin2hex(pubkey_hex.data(), pubkey_hex.size(), u.pub_key, crypto_box_PUBLICKEYBYTES);
+    sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    sqlite3_bind_text(stmt, 1, u.name.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, pubkey_hex.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, u.passHash.c_str(), -1, SQLITE_STATIC);
+    
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
+
 
 
 int main() {
@@ -288,7 +362,32 @@ int main() {
         return 1;
     }
 
-    Server server(8080);
+
+    sqlite3* db;
+    int rc = sqlite3_open("users.db", &db);
+    if(rc) {
+        std::cerr << "Can't open database: " << sqlite3_errmsg(db) << std::endl;
+        return 1;
+    }
+    else {
+        const char* sql = "CREATE TABLE IF NOT EXISTS users ("
+                      "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                      "nickname TEXT NOT NULL UNIQUE, "
+                      "public_key TEXT NOT NULL, "
+                      "password_hash TEXT NOT NULL);";
+
+        char* errMsg = 0;
+        rc = sqlite3_exec(db, sql, 0, 0, &errMsg);
+        if(rc != SQLITE_OK) {
+            std::cerr << "SQL error: " << errMsg << std::endl;
+            sqlite3_free(errMsg);
+            sqlite3_close(db);
+            return 1;
+        }
+    }
+
+    Server server(8080, db);
+    server.loadUsersDB(db);
     server.start();
     std::cout << "Server stopped." << std::endl;
 

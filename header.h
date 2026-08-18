@@ -3,6 +3,7 @@
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "libsodium.lib")
+#pragma comment(lib, "sqlite3.lib")
 
 #include <iostream>
 #include <winsock2.h>
@@ -17,6 +18,7 @@
 #include <unordered_map>
 #include <condition_variable>
 #include "libsodium-win64/include/sodium.h"
+#include "sqlite3.h"
 
 
 struct Message {
