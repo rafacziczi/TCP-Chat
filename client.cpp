@@ -11,6 +11,8 @@ std::mutex pubkeyMutex;
 std::condition_variable pubkeyCv;
 std::unordered_map<std::string, std::string> pendingPubkeys; //klucz: nick
 
+std::mutex loginMutex;
+std::unordered_map<std::string, std::string> pendingLogins; //klucz: nick
 
 bool running = true;
 
@@ -113,7 +115,48 @@ void send_client(const std::string& command, const std::string& receiver, const 
             std::cout << "No password specified." << std::endl;
             return;
         }
-        client_name = receiver;
+
+        {
+            std::lock_guard<std::mutex> lock(loginMutex);
+
+            if(pendingLogins[receiver] == "logged"){
+                client_name = receiver;
+            }
+            else {
+                std::cout << "Login failed." << std::endl;
+                return;
+            }
+        }
+
+        crypto_box_keypair(my_pub_key, my_priv_key);
+
+        const char* appdata_path = std::getenv("APPDATA");
+        if(appdata_path == nullptr) {
+            std::cerr << "Failed to get APPDATA path." << std::endl;
+            return;
+        }
+
+        std::filesystem::create_directories(appdata_path + std::string("\\ChatTCP\\") + receiver);
+
+        std::string pubkey_path = "";
+        pubkey_path += appdata_path; 
+        pubkey_path += "\\ChatTCP\\";
+        pubkey_path += receiver;
+        pubkey_path += "\\pubkey.bin";
+
+        std::string privkey_path = "";
+        privkey_path += appdata_path; 
+        privkey_path += "\\ChatTCP\\";
+        privkey_path += receiver;
+        privkey_path += "\\privkey.bin";
+
+        FILE* pubkey = fopen(pubkey_path.c_str(), "wb");
+        FILE* privkey = fopen(privkey_path.c_str(), "wb");
+
+        fwrite(my_pub_key, 1, crypto_box_PUBLICKEYBYTES, pubkey);
+        fwrite(my_priv_key, 1, crypto_box_SECRETKEYBYTES, privkey);
+        fclose(pubkey);
+        fclose(privkey);
     }
     else if(msg.type == "login") {
         msg.sender = receiver;
@@ -135,7 +178,43 @@ void send_client(const std::string& command, const std::string& receiver, const 
             std::cout << "No password specified." << std::endl;
             return;
         }
-        client_name = receiver; //NAPRAWIC aby bylo dopiero po potwierdzeniu logowania
+        {
+            std::lock_guard<std::mutex> lock(loginMutex);
+
+            if(pendingLogins[receiver] == "logged"){
+                client_name = receiver;
+            }
+            else {
+                std::cout << "Login failed." << std::endl;
+                return;
+            }
+        }
+
+        const char* appdata_path = std::getenv("APPDATA");
+        if(appdata_path == nullptr) {
+            std::cerr << "Failed to get APPDATA path." << std::endl;
+            return;
+        }
+
+        std::string pubkey_path = "";
+        pubkey_path += appdata_path; 
+        pubkey_path += "\\ChatTCP\\";
+        pubkey_path += receiver;
+        pubkey_path += "\\pubkey.bin";
+
+        std::string privkey_path = "";
+        privkey_path += appdata_path; 
+        privkey_path += "\\ChatTCP\\";
+        privkey_path += receiver;
+        privkey_path += "\\privkey.bin";
+
+        FILE* pubkey = fopen(pubkey_path.c_str(), "rb");
+        FILE* privkey = fopen(privkey_path.c_str(), "rb");
+
+        fread(my_priv_key, 1, crypto_box_SECRETKEYBYTES, privkey);
+        fread(my_pub_key, 1, crypto_box_PUBLICKEYBYTES, pubkey);
+        fclose(pubkey);
+        fclose(privkey);
     }
     else if(msg.type == "logout") {
         if(client_name == "") {
@@ -218,6 +297,7 @@ Message receive_client(SOCKET clientSocket) {
     int len = atoi(buffer);
     if(len <= 0 || len > 1000000) {
         std::cerr << "Invalid message" << std::endl;
+        return Message::INVALID;
     }
     
     std::string msg;
@@ -249,6 +329,14 @@ Message receive_client(SOCKET clientSocket) {
         return Message();
     }
 
+    if(msg_rcved.type == "logged") {
+        {
+            std::lock_guard<std::mutex> lock(loginMutex);
+            pendingLogins[msg_rcved.sender] = "logged";
+        }
+        return Message();
+    }
+
     if(msg_rcved.type == "msg" && msg_rcved.sender != "Server") {
         std::string pubkeyString = msg_rcved.pubkey;
         unsigned char send_pubkey[crypto_box_PUBLICKEYBYTES];
@@ -275,13 +363,13 @@ void receive_loop(SOCKET clientSocket) {
     }
 }
 
+#ifndef RUNNING_TESTS
 int main() {
     if (sodium_init() < 0) {
         std::cerr << "sodium_init() failed" << std::endl;
         return 1;
     }
 
-    crypto_box_keypair(my_pub_key, my_priv_key);
 
     WSADATA wsaData;
 
@@ -345,3 +433,4 @@ int main() {
 
     return 0;
 }
+#endif

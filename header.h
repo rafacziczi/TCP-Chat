@@ -8,6 +8,7 @@
 #include <iostream>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <sstream>
@@ -17,6 +18,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <condition_variable>
+#include <filesystem>
 #include "libsodium-win64/include/sodium.h"
 #include "sqlite3.h"
 
@@ -39,7 +41,8 @@ struct Message {
         return type == other.type && 
             sender == other.sender &&
             receiver == other.receiver && 
-            data == other.data;
+            data == other.data &&
+            pubkey == other.pubkey;
         }
 
     bool operator!=(const Message& other) const {
@@ -94,7 +97,7 @@ inline const Message Message::INVALID{"INVALID_MESSAGE", "", "", "", ""};
 
 
 
-bool send_all(SOCKET s, const char* data, int len) {
+inline bool send_all(SOCKET s, const char* data, int len) {
     int sent = 0;
     while (sent < len) {
         int result = send(s, data + sent, len - sent, 0);
@@ -104,7 +107,7 @@ bool send_all(SOCKET s, const char* data, int len) {
     return true;
 }
 
-bool recv_all(SOCKET s, char* buffer, int len) {
+inline bool recv_all(SOCKET s, char* buffer, int len) {
     int received = 0;
     while (received < len) {
         int result = recv(s, buffer + received, len - received, 0);
