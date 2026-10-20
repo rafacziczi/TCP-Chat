@@ -263,6 +263,7 @@ void send_client(const std::string& command, const std::string& receiver, const 
         if(pubkeyStr.empty()) {
             std::cout << "Public key is empty!" << std::endl;
             msg.data = "";
+            return;
         }
         else{
             sodium_hex2bin(recv_pub_key, crypto_box_PUBLICKEYBYTES, pubkeyStr.c_str(), pubkeyStr.size(), nullptr, nullptr, nullptr);
