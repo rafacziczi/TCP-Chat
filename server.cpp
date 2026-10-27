@@ -13,6 +13,41 @@ struct User {
 };
 
 
+bool hashPassword(const std::string& password, std::string& hashOut)
+{
+    char hash[crypto_pwhash_STRBYTES] = {};
+
+    if (crypto_pwhash_str(
+            hash,
+            password.data(),
+            static_cast<unsigned long long>(password.size()),
+            crypto_pwhash_OPSLIMIT_INTERACTIVE,
+            crypto_pwhash_MEMLIMIT_INTERACTIVE
+        ) != 0)
+    {
+        return false;
+    }
+
+    hashOut = hash;
+    sodium_memzero(hash, sizeof(hash));
+
+    return true;
+}
+
+bool verifyPassword(
+    const std::string& storedHash,
+    const std::string& password)
+{
+    if (storedHash.empty())
+        return false;
+
+    return crypto_pwhash_str_verify(
+        storedHash.c_str(),
+        password.data(),
+        static_cast<unsigned long long>(password.size())
+    ) == 0;
+}
+
 class Server {
 private:
     SOCKET serverSocket;
@@ -151,7 +186,7 @@ void Server::handle_conn(SOCKET clientSocket) {
             closesocket(clientSocket);
             return;
         }
-
+        
         if(firstMsg.type == "register") {
             std::string logMsg = "msg\n";
             logMsg += "Server\n";
@@ -172,7 +207,17 @@ void Server::handle_conn(SOCKET clientSocket) {
                 unsigned char pubkey[crypto_box_PUBLICKEYBYTES];
                 sodium_hex2bin(pubkey, crypto_box_PUBLICKEYBYTES, pubkey_hex.c_str(), pubkey_hex.size(), nullptr, nullptr, nullptr);
 
-                User newUser(clientSocket, firstMsg.sender, pubkey, firstMsg.data); //data = passHash
+
+                std::string serverPassHash;
+
+                if (!hashPassword(firstMsg.data, serverPassHash))  //data = password
+                {
+                    std::cerr << "Password hashing failed." << std::endl;
+                    closesocket(clientSocket);
+                    return;
+                }
+                
+                User newUser(clientSocket, firstMsg.sender, pubkey, serverPassHash);
                 users.push_back(newUser); //data = passHash
                 registerUser(newUser, db); // Zapisanie uzytkownika do bazy danych
             }
@@ -185,6 +230,8 @@ void Server::handle_conn(SOCKET clientSocket) {
         else if(firstMsg.type == "login") {
             //tutaj logika sprawdzania hasla i logowania
             int idx;
+            std::string storedPassHash;
+
             {
             std::lock_guard<std::mutex> lock(usersMutex);
             idx = receiver_in(firstMsg.sender);
@@ -194,11 +241,32 @@ void Server::handle_conn(SOCKET clientSocket) {
                 continue;
             }
             else {
-                if(users[idx].passHash == firstMsg.data) { //poki co sprawdzamy bez hashowania, czysty string
-                    users[idx].userSocket = clientSocket; // Aktualizacja gniazda użytkownika
-                    send_msg(clientSocket, "Server", Message("msg\nServer\n" + firstMsg.sender + "\nSuccesfully logged in"));
-                    logged = true;
-                    clientName = firstMsg.sender;
+                storedPassHash = users[idx].passHash;
+                if(verifyPassword(storedPassHash, firstMsg.data)) {
+                    bool attached = false;
+
+                {
+                    std::lock_guard<std::mutex> lock(usersMutex);
+            
+                    // Ponownie znajdź użytkownika pod blokadą.
+                    int currentIdx = receiver_in(firstMsg.sender);
+            
+                    if (currentIdx != -1)
+                    {
+                        users[currentIdx].userSocket = clientSocket;
+                        attached = true;
+                    }
+                }
+            
+                if (!attached)
+                {
+                    send_msg(clientSocket, "Server", Message("msg\nServer\n" + firstMsg.sender + "\nUser not found"));
+                    continue;
+                }
+            
+                send_msg(clientSocket, "Server", Message("msg\nServer\n" + firstMsg.sender +"\nSuccesfully logged in"));
+                logged = true;
+                clientName = firstMsg.sender;
                 }
                 else {
                     send_msg(clientSocket, "Server", Message("msg\nServer\n" + firstMsg.sender + "\nIncorrect password"));
@@ -217,11 +285,16 @@ void Server::handle_conn(SOCKET clientSocket) {
         if(rcved == Message::INVALID) {
                 std::cerr << "Error receiving message" << std::endl;
 
+                {
                 std::lock_guard<std::mutex> lock(usersMutex);
                 int indx = receiver_in(clientName);
-                users.erase(users.begin() + indx);
-                closesocket(clientSocket);
-                return;
+                if (indx != -1 && users[indx].userSocket == clientSocket)
+                {
+                    users[indx].userSocket = INVALID_SOCKET;
+                }
+                }
+            closesocket(clientSocket);
+            return;
             }
 
         if(rcved.type == "logout") { // "logout [ignore]"
