@@ -1,38 +1,30 @@
-#ChatTCP - Secure E2EE Communicator
+# ChatTCP - Secure E2EE Communicator
 
-Wielowątkowy komunikator sieciowy oparty na architekturze klient-serwer, wykorzystujący gniazda TCP (Winsock). Aplikacja kładzie silny nacisk na bezpieczeństwo – implementuje pełne szyfrowanie End-to-End (E2EE) przesyłanych wiadomości oraz bezpieczne przechowywanie danych logowania.
+A multithreaded network messenger based on a client-server architecture using TCP sockets (Winsock). The application places a strong emphasis on security—implementing full End-to-End Encryption (E2EE) for transmitted messages and secure storage of authentication credentials.
 
-Główne funkcjonalności
+## Key Features
 
-Architektura Klient-Serwer: Asynchroniczna obsługa wielu klientów jednocześnie przy użyciu wątków (std::thread) i mechanizmów synchronizacji (std::mutex, std::condition_variable).
+- **Client-Server Architecture:** Asynchronous handling of multiple concurrent clients using threads (`std::thread`) and synchronization mechanisms (`std::mutex`, `std::condition_variable`).
+- **End-to-End Encryption (E2EE):** Powered by the `libsodium` library for secure communication. Messages are encrypted locally on the sender's device using the recipient's public key (`crypto_box_easy`) and can only be decrypted by the intended recipient. The server acts strictly as a zero-knowledge relay for the encrypted payload.
+- **Password Security:** User passwords are never stored in plaintext. The modern Argon2id hashing algorithm (`crypto_pwhash`), integrated via `libsodium`, is used for credential storage.
+- **Persistent Database:** The server utilizes an embedded SQLite3 database to persistently store user IDs, password hashes, and public keys.
+- **Test Coverage:** Business logic, data structures, and cryptographic algorithms are thoroughly tested using the Google Test (GTest) framework.
 
-Szyfrowanie End-to-End (E2EE): Wykorzystanie biblioteki libsodium do bezpiecznej komunikacji. Wiadomości są szyfrowane lokalnie u nadawcy przy pomocy klucza publicznego odbiorcy (crypto_box_easy) i mogą być odszyfrowane wyłącznie przez niego. Serwer pośredniczy jedynie w przekazywaniu zaszyfrowanego ciągu znaków (Zero-Knowledge).
+## Requirements and Dependencies
 
-Bezpieczeństwo Haseł: Hasła użytkowników nie są przechowywane w formie jawnej. Użyto nowoczesnego algorytmu haszującego Argon2id (crypto_pwhash), zintegrowanego z libsodium.
+The project is designed for the Windows environment. The following are required to compile and run the application:
 
-Trwała Baza Danych: Serwer wykorzystuje wbudowaną bazę SQLite3 do trwałego przechowywania identyfikatorów, haszy haseł oraz kluczy publicznych użytkowników.
+- A C++ compiler supporting the **C++17** standard.
+- **libsodium** library (encryption).
+- **SQLite3** library (database).
+- **Google Test** framework (for running unit tests).
+- Linking against the system library `ws2_32.lib` (Windows Sockets 2).
 
-Pokrycie Testami: Logika biznesowa, struktury danych oraz algorytmy kryptograficzne zostały przetestowane przy użyciu frameworka Google Test (GTest).
+## Compilation
 
+The project includes a ready-to-use batch script (`.bat`) for the `g++` compiler (MinGW). The script compiles the server, the client, and the unit test suite, linking the GTest framework on the fly.
 
-Wymagania i Zależności:
-
-Projekt został stworzony dla środowiska Windows. Do kompilacji i uruchomienia wymagane są:
-
-Kompilator wspierający standard C++17.
-
-Biblioteka libsodium (szyfrowanie).
-
-Biblioteka SQLite3 (baza danych).
-
-Framework Google Test (do uruchomienia testów jednostkowych).
-
-Linkowanie z systemową biblioteką ws2_32.lib (Windows Sockets 2).
-
-Kompilacja
-
-Projekt zawiera gotowy skrypt wsadowy .bat dla kompilatora g++ (MinGW). Skrypt kompiluje zarówno serwer, klienta, jak i zestaw testów jednostkowych, dołączając framework GTest w locie.
-
+```bat
 @echo off
 echo Kompilacja serwera...
 g++ -DSODIUM_STATIC -g server.cpp -o server.exe -Ilibsodium-win64/include -Llibsodium-win64/lib -lsodium -lws2_32 -lsqlite3 -lpthread
@@ -42,43 +34,38 @@ g++ -DSODIUM_STATIC -g client.cpp -o client.exe -Ilibsodium-win64/include -Llibs
 
 echo Kompilacja testow...
 g++ -DSODIUM_STATIC -DRUNNING_TESTS -g tests.cpp client.cpp server.cpp googletest/src/gtest-all.cc -o run_tests.exe -Igoogletest/include -Igoogletest -Ilibsodium-win64/include -Llibsodium-win64/lib -lsodium -lws2_32 -lsqlite3 -lpthread
+```
 
+## Usage
 
-Użycie
+1. **Starting the server:** Always launch the server first. It will generate the database file (`users.db`) if it does not already exist and begin listening on port 8080.
+   ```cmd
+   server.exe
+   ```
 
-Uruchomienie serwera: Zawsze uruchamiaj serwer jako pierwszy. Wygeneruje on (jeśli nie istnieje) plik bazy danych users.db i zacznie nasłuchiwać na porcie 8080.
+2. **Starting the client:** Run one or more client instances in separate terminal windows.
+   ```cmd
+   client.exe
+   ```
 
-server.exe
+### Available Client Commands
 
+- `register [username] [password]` – Registers a new user. Generates a key pair and saves the private key locally in `%APPDATA%\ChatTCP\`.
+- `login [username] [password]` – Logs in an existing user.
+- `msg [recipient_username] [message_body]` – Sends an encrypted private message to the specified user. The client automatically fetches the recipient's public key from the server.
+- `logout` – Logs out and safely closes the application.
 
-Uruchomienie klienta: Uruchom jedną lub więcej instancji klienta w osobnych oknach terminala.
+## Testing
 
-client.exe
+To run the unit tests validating data structures, validation rules, and libsodium cryptographic functions, execute the compiled test binary:
 
-
-Dostępne komendy w kliencie:
-
-register [nick] [hasło] - Rejestracja nowego użytkownika. Generuje parę kluczy kryptograficznych i zapisuje klucz prywatny lokalnie w folderze %APPDATA%\ChatTCP\.
-
-login [nick] [hasło] - Logowanie istniejącego użytkownika.
-
-msg [nick_odbiorcy] [treść_wiadomości] - Wysyłanie zaszyfrowanej wiadomości prywatnej do wskazanego użytkownika. Klient automatycznie pobierze klucz publiczny odbiorcy z serwera.
-
-logout - Wylogowanie i bezpieczne zamknięcie programu.
-
-Testy
-
-Aby uruchomić testy weryfikujące struktury danych, ograniczenia walidacyjne oraz poprawność działania szyfrowania w bibliotece libsodium, wykonaj skompilowany plik testowy:
-
+```cmd
 run_tests.exe
+```
 
+## Project Structure
 
-Struktura Projektu
-
-server.cpp - Główna pętla serwera, obsługa gniazd, integracja z bazą danych i zarządzanie połączonymi użytkownikami.
-
-client.cpp - Aplikacja konsolowa użytkownika z asynchronicznym odbieraniem wiadomości oraz szyfrowaniem/deszyfrowaniem.
-
-header.h - Współdzielone struktury danych (np. klasa Message) używane do parsowania pakietów sieciowych.
-
-tests.cpp - Kompletny zestaw testów jednostkowych (GTest) weryfikujących najważniejsze składowe architektury.
+- `server.cpp` – Main server loop, socket handling, database integration, and connected user management.
+- `client.cpp` – User console application featuring asynchronous message reception alongside encryption and decryption.
+- `header.h` – Shared data structures (such as the `Message` class) used for parsing network packets.
+- `tests.cpp` – Comprehensive unit test suite (GTest) covering core architectural components.
